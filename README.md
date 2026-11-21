@@ -13,7 +13,11 @@ Bežecká appka pre 52-týždňový plán na 12 km. Zara zapisuje tréningy (aj 
 curl -fsSL https://raw.githubusercontent.com/vladomarinica-design/zarun-app/main/install.sh | ZARUN_MENTOR_EMAIL=mentor@mail.sk ZARUN_RUNNER_EMAIL=bezkyna@mail.sk bash
 ```
 
-Neskoršia aktualizácia stačí bez e-mailov (zoberú sa z `/opt/zarun/.env`).
+Aktualizácia appky (bez zmeny nastavenia servera):
+
+```
+curl -fsSL https://raw.githubusercontent.com/vladomarinica-design/zarun-app/main/update.sh | bash
+```
 
 Prístup majú len e-maily v `/opt/zarun/.env` (mentor a bežkyňa). Po zmene e-mailov: `systemctl restart zarun`.
 Správa databázy: `https://<adresa>/_/` (prihlasovacie údaje sú v `/opt/zarun/.admin`).
