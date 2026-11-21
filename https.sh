@@ -58,7 +58,9 @@ if [ "$P80" = "pocketbase" ] || [ "$P443" = "pocketbase" ]; then
   PB_ADDR="127.0.0.1:8090"
   P80="$(port_owner 80)"; P443="$(port_owner 443)"
 fi
-UPSTREAM="127.0.0.1:${PB_ADDR##*:}"
+PB_HOST="${PB_ADDR%:*}"; PB_PORT="${PB_ADDR##*:}"
+case "$PB_HOST" in ""|0.0.0.0|"[::]"|localhost) PB_HOST=127.0.0.1 ;; esac
+UPSTREAM="$PB_HOST:$PB_PORT"
 curl -fsS "http://$UPSTREAM/api/health" >/dev/null || die "ZARUN neodpovedá na $UPSTREAM."
 
 SITE_BLOCK="$DOMAIN {
@@ -106,7 +108,55 @@ EOF
   systemctl restart caddy
 }
 
-if [ "$P80" = "caddy" ] || [ "$P443" = "caddy" ] || { systemctl is-active --quiet caddy 2>/dev/null && [ -f /etc/caddy/Caddyfile ]; }; then
+# Je port 80/443 obsadený Docker kontajnerom?
+DOCKER_C=""
+if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
+  DOCKER_C="$(docker ps --format '{{.Names}}\t{{.Ports}}' | grep -E ':(80|443)->' | head -n1 | cut -f1 || true)"
+fi
+
+docker_info(){
+  echo "--- Docker kontajnery ---"
+  docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}' 2>/dev/null || true
+  if [ -n "$DOCKER_C" ]; then
+    echo "--- Súbory kontajnera $DOCKER_C ---"
+    docker inspect -f '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{println}}{{end}}' "$DOCKER_C" 2>/dev/null || true
+  fi
+}
+
+if [ -n "$DOCKER_C" ]; then
+  IMG="$(docker inspect -f '{{.Config.Image}}' "$DOCKER_C")"
+  say "Porty 80/443 má Docker kontajner $DOCKER_C ($IMG)"
+  case "$IMG" in *caddy*) : ;; *) docker_info; die "Kontajner $DOCKER_C nie je Caddy, nič som nemenil." ;; esac
+  # nájdi Caddyfile na disku servera
+  CF=""; DEST_CF=/etc/caddy/Caddyfile
+  while IFS='|' read -r SRC DST; do
+    [ -z "$SRC" ] && continue
+    if [ "$DST" = "/etc/caddy/Caddyfile" ] && [ -f "$SRC" ]; then CF="$SRC"; fi
+    if [ "$DST" = "/etc/caddy" ] && [ -f "$SRC/Caddyfile" ]; then CF="$SRC/Caddyfile"; fi
+  done < <(docker inspect -f '{{range .Mounts}}{{.Source}}|{{.Destination}}{{println}}{{end}}' "$DOCKER_C")
+  [ -n "$CF" ] || { docker_info; die "Nenašiel som Caddyfile kontajnera $DOCKER_C, nič som nemenil."; }
+  echo "Caddyfile: $CF"
+  grep -Eq '^[[:space:]]*auto_https[[:space:]]+off' "$CF" && { docker_info; cat "$CF"; die "V Caddyfile je vypnuté HTTPS (auto_https off), nič som nemenil."; }
+  # adresa ZARUN tak, ako ju kontajner už pozná
+  C_UP="$(grep -Eo 'reverse_proxy[[:space:]]+[^[:space:]{]*:'"$PB_PORT" "$CF" | head -n1 | awk '{print $2}' || true)"
+  [ -n "$C_UP" ] || C_UP="$UPSTREAM"
+  echo "Kontajner sa na ZARUN pripája cez: $C_UP"
+  cp -p "$CF" "$CF.pred-https-$STAMP"
+  if ! grep -qF "$DOMAIN" "$CF"; then
+    printf '\n# ZARUN HTTPS\n%s {\n\tencode zstd gzip\n\treverse_proxy %s\n}\n' "$DOMAIN" "$C_UP" >> "$CF"
+  fi
+  if ! docker exec "$DOCKER_C" caddy validate --config "$DEST_CF" --adapter caddyfile >/dev/null 2>&1; then
+    cat "$CF.pred-https-$STAMP" > "$CF"
+    docker exec "$DOCKER_C" caddy validate --config "$DEST_CF" --adapter caddyfile 2>&1 | tail -n 5 || true
+    die "Nová konfigurácia nebola v poriadku, vrátil som pôvodnú."
+  fi
+  if ! docker exec -w /etc/caddy "$DOCKER_C" caddy reload --config "$DEST_CF" --adapter caddyfile >/dev/null 2>&1; then
+    cat "$CF.pred-https-$STAMP" > "$CF"
+    docker exec -w /etc/caddy "$DOCKER_C" caddy reload --config "$DEST_CF" --adapter caddyfile >/dev/null 2>&1 || true
+    die "Caddy novú konfiguráciu neprijal, vrátil som pôvodnú."
+  fi
+
+elif [ "$P80" = "caddy" ] || [ "$P443" = "caddy" ] || { systemctl is-active --quiet caddy 2>/dev/null && [ -f /etc/caddy/Caddyfile ]; }; then
   say "Caddy už beží – pridávam novú adresu"
   CF=/etc/caddy/Caddyfile
   [ -f "$CF" ] || die "Caddy beží, ale nenašiel som $CF."
@@ -159,6 +209,7 @@ EOF
 
 else
   echo "Port 80 používa: ${P80:-nikto}, port 443: ${P443:-nikto}"
+  command -v docker >/dev/null && docker_info
   die "Tento webový server nepoznám, nič som nemenil."
 fi
 
